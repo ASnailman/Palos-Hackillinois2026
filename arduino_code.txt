@@ -1,0 +1,258 @@
+#include <Wire.h>
+#include <MPU6050.h>
+#include <PID_v1.h>
+
+#define PWMA 5
+#define AIN1 7
+#define PWMB 6
+#define BIN1 8
+#define STBY 3
+
+#define TRIG_PIN 13
+#define ECHO_PIN 12
+
+unsigned long lastPingTime = 0;
+
+boolean manual = false;
+
+// Serial parsing
+String inputString = "";
+boolean stringComplete = false;
+
+// State Machine
+char current_mode = 'S';  // 'S'top, 'F'orward, 'B'ackward, 'T'urn
+int baseSpeed = 150;
+
+// IMU Tracking
+MPU6050 mpu;
+float current_heading = 0;
+float target_heading = 0;
+unsigned long last_imu_time = 0;
+float gyroZ_offset = 0;
+
+// PID Setup
+double pid_input, pid_output, pid_setpoint;
+double Kp = 2.2, Ki = 0.0, Kd = 0.1;
+PID myPID(&pid_input, &pid_output, &pid_setpoint, Kp, Ki, Kd, DIRECT);
+
+void setup() {
+  Serial.begin(115200);
+  inputString.reserve(50);
+
+  // Motor Pins
+  pinMode(PWMA, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(PWMB, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(STBY, OUTPUT);
+  digitalWrite(STBY, HIGH);
+
+  // Ultrasonic Pins
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  // Initialize MPU6050
+  Wire.begin();
+  // Serial.println("Initializing MPU...");
+  mpu.initialize();
+  if (!mpu.testConnection()) {
+    // Serial.println("MPU6050 connection failed");
+    while (true)
+      ;
+  }
+
+  // Calibrate Gyro (Robot must be perfectly still)
+  // Serial.println("Calibrating Gyro...");
+  long z_sum = 0;
+  for (int i = 0; i < 500; i++) {
+    z_sum += mpu.getRotationZ();
+    delay(2);
+  }
+  gyroZ_offset = z_sum / 500.0;
+
+  // Initialize PID
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetOutputLimits(-100, 100);
+
+  last_imu_time = millis();
+  // Serial.println("SYSTEM_READY");
+}
+
+void loop() {
+  if (manual) {
+    target_heading = -45;
+    current_mode = 'T';
+    updateHeading();
+    executeState();
+  } else {
+    // 1. Process Pi Commands
+    if (stringComplete) {
+      parseCommand(inputString);
+      inputString = "";
+      stringComplete = false;
+    }
+    // 2. Update heading constantly
+    updateHeading();
+
+    // 3. Execute Current State
+    executeState();
+
+    // 4. Ping Ultrasonic every 100ms
+    if (millis() - lastPingTime > 50) {
+      getDistance();
+      lastPingTime = millis();
+    }
+  }
+}
+
+void updateHeading() {
+  unsigned long current_time = millis();
+  float dt = (current_time - last_imu_time) / 1000.0;
+  last_imu_time = current_time;
+
+  float raw_gz = mpu.getRotationZ() - gyroZ_offset;
+  float gz_rate = raw_gz / 131.0;
+
+  // Ignore tiny noise (Deadband)
+  if (abs(gz_rate) > 0.5) {
+    current_heading += (gz_rate * dt);
+  }
+}
+
+// FIX: Added 'double' data types and the library update function!
+void updatePID(double p, double i, double d) {
+  Kp = p;
+  Ki = i;
+  Kd = d;
+  myPID.SetTunings(Kp, Ki, Kd);  // This actually applies the new math
+
+  // Print confirmation back to the Pi
+  // Serial.print("PID Updated: ");
+  // Serial.print(Kp); Serial.print(", ");
+  // Serial.print(Ki); Serial.print(", ");
+  // Serial.println(Kd);
+}
+
+void executeState() {
+  if (current_mode == 'S') {
+    setMotors(0, 0);
+    return;
+  }
+
+  if (current_mode == 'F' || current_mode == 'B') {
+    pid_input = current_heading;
+    pid_setpoint = target_heading;
+    myPID.Compute();
+
+    int leftSpeed, rightSpeed;
+    if (current_mode == 'F') {
+      leftSpeed = constrain(baseSpeed + pid_output, 0, 255);
+      rightSpeed = constrain(baseSpeed - pid_output, 0, 255);
+    } else {
+      leftSpeed = constrain(-baseSpeed + pid_output, -255, 0);
+      rightSpeed = constrain(-baseSpeed - pid_output, -255, 0);
+    }
+    setMotors(leftSpeed, rightSpeed);
+  }
+
+  if (current_mode == 'T') {
+    float error = target_heading - current_heading;
+
+    if (abs(error) <= 2.0) {
+      current_mode = 'S';
+      setMotors(0, 0);
+      Serial.println("TURN_COMPLETE");
+    } else {
+      int turn_speed = map(abs(error), 0, 90, 80, 180);
+      turn_speed = constrain(turn_speed, 80, 180);
+
+      if (error > 0) {
+        setMotors(turn_speed, -turn_speed);
+      } else {
+        setMotors(-turn_speed, turn_speed);
+      }
+    }
+  }
+}
+
+void parseCommand(String cmd) {
+  cmd.trim();
+  int commaIndex = cmd.indexOf(',');
+  if (commaIndex == -1) return;
+
+  char action = cmd.charAt(0);
+  float value = cmd.substring(commaIndex + 1).toFloat();
+
+  if (action == 'F' || action == 'B') {
+    if (current_mode != action) {
+      target_heading = current_heading;
+    }
+    current_mode = action;
+    baseSpeed = abs((int)value);
+  } else if (action == 'T') {
+    target_heading = current_heading + value;
+    current_mode = 'T';
+  } else if (action == 'S') {
+    current_mode = 'S';
+  }
+  // Calls the fixed updatePID function!
+  else if (action == 'P') {
+    updatePID(value, Ki, Kd);
+  } else if (action == 'I') {
+    updatePID(Kp, value, Kd);
+  } else if (action == 'D') {
+    updatePID(Kp, Ki, value);
+  }
+}
+
+
+
+void setMotors(int leftSpeed, int rightSpeed) {
+  leftSpeed = constrain(leftSpeed, -255, 255);
+  rightSpeed = constrain(rightSpeed, -255, 255);
+
+  if (leftSpeed >= 0) digitalWrite(AIN1, HIGH);
+  else digitalWrite(AIN1, LOW);
+  analogWrite(PWMA, abs(leftSpeed));
+
+  if (rightSpeed >= 0) digitalWrite(BIN1, HIGH);
+  else digitalWrite(BIN1, LOW);
+  analogWrite(PWMB, abs(rightSpeed));
+}
+
+void serialEvent() {
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    inputString += inChar;
+    if (inChar == '\n') {
+      stringComplete = true;
+    }
+  }
+}
+
+
+
+float getDistance() {
+  // Send trigger pulse
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  // Measure echo time
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  // Convert to distance (cm)
+  float distance = duration * 0.034 / 2;
+  if (distance == 0) {
+    return 0;
+  }
+
+  // Serial.println(distance);
+  return distance;
+}
+
+void usTest() {
+  return 0;
+}

@@ -1,6 +1,10 @@
 import serial
 import time
+from robot import Robot
 
+bot = Robot()
+tt = 22.5
+bot.set_head(1500,1500)
 try:
     arduino = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.1)
     time.sleep(2)
@@ -22,7 +26,7 @@ def execute_turn(degrees):
     while turning:
         if arduino.in_waiting > 0:
             line = arduino.readline().decode('utf-8').strip()
-            
+            print(line)
             if line.startswith("DIST:"):
                 pass 
                 
@@ -30,7 +34,84 @@ def execute_turn(degrees):
                 print(f"Turn of {degrees} degrees successfully completed!")
                 turning = False
                 
-        time.sleep(0.01) 
+        time.sleep(0.5) 
+
+def startingBeep():
+    bot.beep()
+    time.sleep(1)
+    bot.beep()
+    time.sleep(1)
+    bot.beep()
+
+    return
+
+def clearLeft():
+    while(True):
+        
+        parity = 0
+        arduino.write(b"F,200\n")
+        while(True):
+            if(bot.get_distance() < 25):
+                arduino.write(b"S,0\n")
+                break
+        print("Hit Wall\n")
+        time.sleep(1)
+        if(parity == 1):
+            execute_turn(90)
+        else:
+            execute_turn(-90)
+
+        if(bot.get_distance() < 25):
+            #end
+            return
+        print("rotated a bit\n")
+        arduino.write(b"F,100\n")
+        time.sleep(1)
+        arduino.write(b"S,0\n")
+        time.sleep(1)
+        if(parity == 1):
+            execute_turn(90)
+        else:
+            execute_turn(-90)
+        parity = 1- parity
+        time.sleep(0.5)
+
+def clearSand():
+    clearLeft()    
+    return 0
+
+def getDistance():
+    d = arduino.readline().decode().strip()
+    print("Front Sonar: " + d)
+    try:
+        return float(d)
+    except:
+        return 10000
+
+def turn_at_wall(direction):
+    if direction == "forward":
+        arduino.write(b"B,200\n")
+        time.sleep(0.5)
+        execute_turn(90)
+        arduino.write(b"F,200\n")
+        time.sleep(0.5)
+        if(bot.get_distance() < tt):
+            execute_turn(90)
+            return True
+        execute_turn(90)
+        return False
+    elif direction == "backward":
+        arduino.write(b"B,200\n")
+        time.sleep(0.5)
+        execute_turn(-90)
+        arduino.write(b"F,200\n")
+        time.sleep(0.5)
+        if(bot.get_distance() < tt):
+            execute_turn(-90)
+            return False
+
+        execute_turn(-90)
+        return True
 
 
 def setPid(Kp,Ki,Kd):
@@ -46,17 +127,50 @@ def setPid(Kp,Ki,Kd):
     time.sleep(0.05)
 
 try:
+    #Safety Feature
+    # bot.beep_succession(3,0.8)
     #PID
     setPid(2.4,0.2,0.01)
-    time.sleep(1)
+    time.sleep(1.5)
+    # arduino.write(b"S,0\n")
 
-    # # Movement
-    arduino.write(b"F,200\n")
-    time.sleep(5)
-    arduino.write(b"B,200\n")
-    time.sleep(5)
-    arduino.write(b"S,0\n")
+    # execute_turn(90)
+    # arduino.write(b"F,200\n")
+    # time.sleep(0.5)
+    # arduino.write(b"S,0\n")
+    # time.sleep(0.5)
+    # execute_turn(90)
+        
+    # clearLeft()
+    # arduino.write(b"F,200\n")
+    # time.sleep(0.5)
+    # arduino.write(b"S,0\n")
+    # time.sleep(0.5)
+    # execute_turn(-45)
+    # time.sleep(1.0)
+
+    # arduino.write(b"F,200\n")
+    # time.sleep(0.5)
+    # arduino.write(b"S,0\n")
+
+    forward = True
+    for i in range(6):
+        while bot.get_distance2() > tt:
+            arduino.write(b"F,200\n")    
+        arduino.write(b"S,0\n")
+        if (forward):
+            forward = turn_at_wall("forward")
+            
+        else:
+            forward = turn_at_wall("backward")
+
+    # while(True):
+    #     print(bot.get_distance2())
 
 except KeyboardInterrupt:
     print("Test aborted by user. Stopping.")
     arduino.write(b"S,0\n")
+
+
+
+#setPid(2.4,0.2,0.01)
